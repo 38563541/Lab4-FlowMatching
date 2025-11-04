@@ -2,8 +2,8 @@ import argparse
 
 import numpy as np
 import torch
-from dataset import tensor_to_pil_image
-from fm import FlowMatching
+from .dataset import tensor_to_pil_image
+from .fm import FlowMatching
 from pathlib import Path
 
 
@@ -31,7 +31,7 @@ def main(args):
             shape = (B, 3, fm.image_resolution, fm.image_resolution)
             samples = fm.sample(
                 shape,
-                num_inference_timesteps=20,
+                num_inference_timesteps=args.num_inference_steps,
                 class_label=torch.randint(1, 4, (B,)).to(device),
                 guidance_scale=args.cfg_scale,
             )
@@ -53,6 +53,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", type=str)
     parser.add_argument("--use_cfg", action="store_true")
     parser.add_argument("--cfg_scale", type=float, default=7.5)
+    parser.add_argument("--num_inference_steps", type=int, default=20)
 
     args = parser.parse_args()
     main(args)
