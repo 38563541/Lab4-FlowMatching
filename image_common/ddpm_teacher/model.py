@@ -52,10 +52,7 @@ class DiffusionModule(nn.Module):
             return self.get_loss_mean(x0, class_label, noise)
         else:
             raise ValueError(f"Unknown predictor: {self.predictor}")
-    
-    
-    
-    
+
     @property
     def device(self):
         return next(self.network.parameters()).device

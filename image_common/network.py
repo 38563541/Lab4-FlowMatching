@@ -78,18 +78,19 @@ class UNet(nn.Module):
         if self.use_cfg and class_label is not None:
             if self.training:
                 assert not torch.any(class_label == 0) # 0 for null.
-                
-                ######## TODO ########
-                # DO NOT change the code outside this part.
-                # Assignment 2. Implement random null conditioning in CFG training.
-                raise NotImplementedError("TODO")
-                #######################
-            
-            ######## TODO ########
-            # DO NOT change the code outside this part.
-            # Assignment 2. Implement class conditioning
-            raise NotImplementedError("TODO")
-            #######################
+
+                # Random null conditioning for CFG training
+                # During training, randomly replace some class labels with 0 (null token)
+                # with probability self.cfg_dropout (default: 0.1)
+                # This teaches the model to work both with and without class conditioning
+                mask = torch.rand(class_label.shape[0], device=class_label.device) < self.cfg_dropout
+                class_label = class_label.clone()
+                class_label[mask] = 0
+
+            # Class conditioning
+            # Get class embeddings and add them to the time embeddings
+            cemb = self.class_embedding(class_label)
+            temb = temb + cemb
 
         # Downsampling
         h = self.head(x)

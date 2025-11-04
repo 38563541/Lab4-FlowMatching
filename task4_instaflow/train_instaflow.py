@@ -1,13 +1,14 @@
 """
-Training Script for InstaFlow One-Step Generator (Task 4)
+Training Script for InstaFlow One-Step Generator (Task 4 - Phase 2)
 
-Trains a one-step generator via distillation from a pretrained Flow Matching model.
-The model learns to generate high-quality images in a single forward pass.
+Trains a one-step generator via distillation from a 2-Rectified Flow teacher model.
+The student model learns to generate high-quality images in a single forward pass
+by mimicking the teacher's multi-step outputs.
 
 Reference: Liu et al., "InstaFlow: One Step is Enough for High-Quality Diffusion-Based Text-to-Image Generation"
 
 Usage:
-    python image_fm_todo/train_instaflow.py \
+    python -m task4_instaflow.train_instaflow \
         --distill_data_path data/afhq_instaflow \
         --use_cfg \
         --train_num_steps 100000
@@ -28,7 +29,7 @@ from tqdm import tqdm
 
 sys.path.append('.')
 from image_common.dataset import tensor_to_pil_image
-from image_common.fm import FlowMatching, FMScheduler
+from image_common.instaflow import InstaFlowModel
 from image_common.network import UNet
 
 from task4_instaflow.instaflow_dataset import (
@@ -87,10 +88,8 @@ def main(args):
     if args.use_cfg:
         print(f"Number of classes: {num_classes}")
 
-    # Set up the scheduler (same as base FM)
-    fm_scheduler = FMScheduler(sigma_min=args.sigma_min)
-
-    # Initialize student network (same architecture as teacher)
+    # Initialize InstaFlow student network
+    # Note: Can use a smaller "very simple U-Net" for faster inference
     network = UNet(
         image_resolution=image_resolution,
         ch=128,
@@ -103,11 +102,12 @@ def main(args):
         num_classes=num_classes,
     )
 
-    fm = FlowMatching(network, fm_scheduler)
-    fm = fm.to(config.device)
+    # Use InstaFlowModel instead of FlowMatching
+    instaflow = InstaFlowModel(network, use_lpips=args.use_lpips)
+    instaflow = instaflow.to(config.device)
 
     # Same optimizer and scheduler as base FM
-    optimizer = torch.optim.Adam(fm.network.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(instaflow.network.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lr_lambda=lambda t: min((t + 1) / config.warmup_steps, 1.0)
     )
@@ -120,37 +120,34 @@ def main(args):
     with tqdm(initial=step, total=config.train_num_steps) as pbar:
         while step < config.train_num_steps:
             if step % config.log_interval == 0:
-                fm.eval()
+                instaflow.eval()
                 # Plot loss curve
                 plt.plot(losses)
                 plt.xlabel('Training Step')
-                plt.ylabel('Distillation Loss')
+                plt.ylabel('Distillation Loss (L2 + LPIPS)' if args.use_lpips else 'Distillation Loss (L2)')
                 plt.title('InstaFlow Training Loss')
                 plt.savefig(f"{save_dir}/loss.png")
                 plt.close()
 
                 # Generate sample images with ONE-STEP inference
-                shape = (4, 3, fm.image_resolution, fm.image_resolution)
+                shape = (4, 3, instaflow.image_resolution, instaflow.image_resolution)
                 if args.use_cfg:
                     class_label = torch.tensor([1, 1, 2, 3]).to(config.device)
-                    # ONE-STEP GENERATION
-                    samples = fm.sample(
+                    # ONE-STEP GENERATION (no guidance scale needed - baked in!)
+                    samples = instaflow.sample(
                         shape,
-                        class_label=class_label,
-                        guidance_scale=7.5,
-                        num_inference_timesteps=1,  # ONE STEP!
-                        verbose=False
+                        class_label=class_label
                     )
                 else:
-                    samples = fm.sample(shape, num_inference_timesteps=1, verbose=False)
+                    samples = instaflow.sample(shape)
 
                 pil_images = tensor_to_pil_image(samples)
                 for i, img in enumerate(pil_images):
                     img.save(save_dir / f"step={step}-{i}.png")
 
                 # Save checkpoint
-                fm.save(f"{save_dir}/last.ckpt")
-                fm.train()
+                instaflow.save(f"{save_dir}/last.ckpt")
+                instaflow.train()
 
             # Load batch from distillation dataset
             if args.use_cfg:
@@ -161,36 +158,13 @@ def main(args):
                 x_0, x_1 = x_0.to(config.device), x_1.to(config.device)
                 label = None
 
-            ######## TODO ########
-            # DO NOT change the code outside this part.
-            # Implement InstaFlow one-step distillation training:
-            #
-            # The goal is to train a student model that can generate high-quality images
-            # in ONE STEP from noise to data. The student learns from teacher-generated
-            # pairs (x_0, x_1) where x_1 is already a high-quality sample.
-            #
-            # Training objective:
-            # The student learns the velocity field that enables one-step generation.
-            # We use the same CFM loss but on distillation pairs from the teacher.
-            #
-            # Loss: E[||v_θ(ψ_t(x_0|x_1); t) - (x_1 - (1 - σ_min)x_0)||²]
-            #
-            # Key insight: The student learns on teacher's high-quality outputs,
-            # and the learned velocity field enables direct one-step mapping.
-            #
-            # Hint 1: Use fm.get_loss(x_1, x0=x_0, class_label=label)
-            # Hint 2: The loss is the same as rectified flow, but the training
-            #         enables ONE-STEP inference due to teacher's quality
-            # Hint 3: Some implementations add additional losses (perceptual, GAN)
-            #         but for this assignment, CFM loss is sufficient
-
-            # Compute distillation loss
+            # Compute InstaFlow distillation loss
+            # The student learns to map x_0 directly to x_1 in ONE STEP
+            # InstaFlowModel.get_loss handles the one-step objective (Eq. 6 in paper)
             if args.use_cfg:
-                loss = fm.get_loss(x_1, class_label=label, x0=x_0)
+                loss = instaflow.get_loss(x_1, x_0, class_label=label)
             else:
-                loss = fm.get_loss(x_1, x0=x_0)
-
-            ######################
+                loss = instaflow.get_loss(x_1, x_0)
 
             pbar.set_description(f"Loss: {loss.item():.4f}")
 
@@ -200,7 +174,7 @@ def main(args):
 
             # Optional: Gradient clipping for stability
             if args.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(fm.network.parameters(), args.grad_clip)
+                torch.nn.utils.clip_grad_norm_(instaflow.network.parameters(), args.grad_clip)
 
             optimizer.step()
             scheduler.step()
@@ -210,19 +184,27 @@ def main(args):
             pbar.update(1)
 
     print(f"Training completed! Final checkpoint saved at {save_dir}/last.ckpt")
-    print("\nYou can now generate images with ONE STEP:")
-    print(f"python image_fm_todo/sampling.py \\")
+    print("\n" + "="*80)
+    print("Phase 2 complete! You now have an InstaFlow one-step generator.")
+    print("\nGenerate images with ONE STEP:")
+    print(f"python -m image_common.sampling \\")
     print(f"  --use_cfg \\")
     print(f"  --ckpt_path {save_dir}/last.ckpt \\")
     print(f"  --save_dir results/instaflow_samples \\")
     print(f"  --num_inference_steps 1")
+    print("\nEvaluate your model:")
+    print(f"python -m task4_instaflow.evaluate_instaflow \\")
+    print(f"  --rf2_ckpt_path <2RF_CKPT> \\")
+    print(f"  --instaflow_ckpt_path {save_dir}/last.ckpt \\")
+    print(f"  --save_dir results/instaflow_eval")
+    print("="*80)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train InstaFlow one-step generator")
+    parser = argparse.ArgumentParser(description="Phase 2: Train InstaFlow one-step generator")
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--distill_data_path", type=str, required=True,
-                        help="Path to distillation dataset")
+                        help="Path to InstaFlow distillation dataset from Phase 2 data generation")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument(
         "--train_num_steps",
@@ -233,10 +215,11 @@ if __name__ == "__main__":
     parser.add_argument("--warmup_steps", type=int, default=200)
     parser.add_argument("--log_interval", type=int, default=200)
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
-    parser.add_argument("--sigma_min", type=float, default=0.001)
     parser.add_argument("--seed", type=int, default=63)
     parser.add_argument("--use_cfg", action="store_true")
     parser.add_argument("--cfg_dropout", type=float, default=0.1)
+    parser.add_argument("--use_lpips", action="store_true",
+                        help="Use LPIPS perceptual loss in addition to L2 (improves quality)")
     parser.add_argument("--grad_clip", type=float, default=1.0,
                         help="Gradient clipping (0 to disable)")
     args = parser.parse_args()

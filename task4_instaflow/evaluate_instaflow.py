@@ -1,12 +1,12 @@
 """
-Evaluation Script for InstaFlow One-Step Generator (Task 4)
+Evaluation Script for InstaFlow One-Step Generator (Task 4 - Phase 2)
 
-Compares InstaFlow one-step generation against multi-step baseline models.
+Compares InstaFlow one-step generation against 2-Rectified Flow teacher model.
 Measures both quality (FID) and speed (samples/second).
 
 Usage:
-    python image_fm_todo/evaluate_instaflow.py \
-        --base_ckpt_path results/cfg_fm-XXX/last.ckpt \
+    python -m task4_instaflow.evaluate_instaflow \
+        --rf2_ckpt_path results/2rf_from_ddpm-XXX/last.ckpt \
         --instaflow_ckpt_path results/instaflow-XXX/last.ckpt \
         --save_dir results/instaflow_eval
 """
@@ -25,10 +25,11 @@ from tqdm import tqdm
 sys.path.append('.')
 from image_common.dataset import tensor_to_pil_image
 from image_common.fm import FlowMatching
+from image_common.instaflow import InstaFlowModel
 
 
-def generate_samples(fm, num_samples, num_steps, batch_size, device, use_cfg=True, cfg_scale=7.5, model_name="Model"):
-    """Generate samples with specified number of steps"""
+def generate_samples_fm(fm, num_samples, num_steps, batch_size, device, use_cfg=True, cfg_scale=7.5, model_name="Model"):
+    """Generate samples from Flow Matching model with specified number of steps"""
     num_batches = int(np.ceil(num_samples / batch_size))
     all_samples = []
 
@@ -60,6 +61,38 @@ def generate_samples(fm, num_samples, num_steps, batch_size, device, use_cfg=Tru
     return all_samples, elapsed_time
 
 
+def generate_samples_instaflow(instaflow, num_samples, batch_size, device, use_cfg=True, model_name="InstaFlow"):
+    """Generate samples from InstaFlow one-step model"""
+    num_batches = int(np.ceil(num_samples / batch_size))
+    all_samples = []
+
+    start_time = time.time()
+
+    for i in tqdm(range(num_batches), desc=f"{model_name} (1 step)"):
+        sidx = i * batch_size
+        eidx = min(sidx + batch_size, num_samples)
+        B = eidx - sidx
+
+        shape = (B, 3, instaflow.image_resolution, instaflow.image_resolution)
+
+        if use_cfg:
+            class_label = torch.randint(1, 4, (B,)).to(device)
+            # ONE-STEP GENERATION (CFG baked in!)
+            samples = instaflow.sample(
+                shape,
+                class_label=class_label
+            )
+        else:
+            samples = instaflow.sample(shape)
+
+        all_samples.append(samples.cpu())
+
+    elapsed_time = time.time() - start_time
+    all_samples = torch.cat(all_samples, dim=0)[:num_samples]
+
+    return all_samples, elapsed_time
+
+
 def save_samples(samples, save_dir, prefix="sample"):
     """Save generated samples as images"""
     save_dir = Path(save_dir)
@@ -76,87 +109,57 @@ def main(args):
 
     device = f"cuda:{args.gpu}"
 
-    # Load models
-    print(f"Loading base FM model from {args.base_ckpt_path}")
-    fm_base = FlowMatching(None, None)
-    fm_base.load(args.base_ckpt_path)
-    fm_base.eval()
-    fm_base = fm_base.to(device)
+    # Load 2-Rectified Flow teacher model
+    print(f"Loading 2-Rectified Flow teacher model from {args.rf2_ckpt_path}")
+    rf2_teacher = FlowMatching(None, None)
+    rf2_teacher.load(args.rf2_ckpt_path)
+    rf2_teacher.eval()
+    rf2_teacher = rf2_teacher.to(device)
 
     print(f"Loading InstaFlow model from {args.instaflow_ckpt_path}")
-    fm_instaflow = FlowMatching(None, None)
-    fm_instaflow.load(args.instaflow_ckpt_path)
-    fm_instaflow.eval()
-    fm_instaflow = fm_instaflow.to(device)
-
-    # Optionally load rectified flow for comparison
-    fm_rectified = None
-    if args.rectified_ckpt_path:
-        print(f"Loading Rectified Flow model from {args.rectified_ckpt_path}")
-        fm_rectified = FlowMatching(None, None)
-        fm_rectified.load(args.rectified_ckpt_path)
-        fm_rectified.eval()
-        fm_rectified = fm_rectified.to(device)
+    instaflow = InstaFlowModel(None)
+    instaflow.load(args.instaflow_ckpt_path)
+    instaflow.eval()
+    instaflow = instaflow.to(device)
 
     # Evaluation results
     results = {}
 
     print(f"\n{'='*80}")
     print(f"InstaFlow One-Step Generation Evaluation")
-    print(f"Generating {args.num_samples} samples with CFG scale {args.cfg_scale}")
+    print(f"Generating {args.num_samples} samples")
     print(f"{'='*80}\n")
 
-    # 1. Base FM with 20 steps
-    print("1. Base Flow Matching (20 steps)")
-    samples_base, time_base = generate_samples(
-        fm_base, args.num_samples, 20, args.batch_size, device,
-        use_cfg=args.use_cfg, cfg_scale=args.cfg_scale, model_name="Base FM"
+    # 1. 2-Rectified Flow Teacher (multi-step baseline)
+    rf2_steps = args.rf2_inference_steps
+    print(f"1. 2-Rectified Flow Teacher ({rf2_steps} steps)")
+    samples_rf2, time_rf2 = generate_samples_fm(
+        rf2_teacher, args.num_samples, rf2_steps, args.batch_size, device,
+        use_cfg=args.use_cfg, cfg_scale=1.5, model_name="2-RF Teacher"
     )
-    base_save_dir = save_dir / "base_fm_20steps"
-    save_samples(samples_base, base_save_dir)
+    rf2_save_dir = save_dir / f"2rf_{rf2_steps}steps"
+    save_samples(samples_rf2, rf2_save_dir)
 
-    results['Base FM (20 steps)'] = {
-        'steps': 20,
-        'time': time_base,
-        'samples_per_sec': args.num_samples / time_base,
+    results[f'2-RF Teacher ({rf2_steps} steps)'] = {
+        'steps': rf2_steps,
+        'time': time_rf2,
+        'samples_per_sec': args.num_samples / time_rf2,
         'speedup': 1.0,
-        'save_dir': str(base_save_dir)
+        'save_dir': str(rf2_save_dir)
     }
-    print(f"   Time: {time_base:.2f}s ({args.num_samples/time_base:.2f} samples/s)")
-    print(f"   Saved to: {base_save_dir}\n")
+    print(f"   Time: {time_rf2:.2f}s ({args.num_samples/time_rf2:.2f} samples/s)")
+    print(f"   Saved to: {rf2_save_dir}\n")
 
-    # 2. Rectified Flow with 10 steps (if available)
-    if fm_rectified:
-        print("2. Rectified Flow (10 steps)")
-        samples_rectified, time_rectified = generate_samples(
-            fm_rectified, args.num_samples, 10, args.batch_size, device,
-            use_cfg=args.use_cfg, cfg_scale=args.cfg_scale, model_name="Rectified Flow"
-        )
-        rectified_save_dir = save_dir / "rectified_fm_10steps"
-        save_samples(samples_rectified, rectified_save_dir)
-
-        speedup_rectified = time_base / time_rectified
-        results['Rectified Flow (10 steps)'] = {
-            'steps': 10,
-            'time': time_rectified,
-            'samples_per_sec': args.num_samples / time_rectified,
-            'speedup': speedup_rectified,
-            'save_dir': str(rectified_save_dir)
-        }
-        print(f"   Time: {time_rectified:.2f}s ({args.num_samples/time_rectified:.2f} samples/s)")
-        print(f"   Speedup: {speedup_rectified:.2f}x")
-        print(f"   Saved to: {rectified_save_dir}\n")
-
-    # 3. InstaFlow with 1 step (ONE-STEP GENERATION!)
-    print("3. InstaFlow (ONE STEP)")
-    samples_instaflow, time_instaflow = generate_samples(
-        fm_instaflow, args.num_samples, 1, args.batch_size, device,
-        use_cfg=args.use_cfg, cfg_scale=args.cfg_scale, model_name="InstaFlow"
+    # 2. InstaFlow with 1 step (ONE-STEP GENERATION!)
+    print("2. InstaFlow (ONE STEP)")
+    samples_instaflow, time_instaflow = generate_samples_instaflow(
+        instaflow, args.num_samples, args.batch_size, device,
+        use_cfg=args.use_cfg, model_name="InstaFlow"
     )
     instaflow_save_dir = save_dir / "instaflow_1step"
     save_samples(samples_instaflow, instaflow_save_dir)
 
-    speedup_instaflow = time_base / time_instaflow
+    speedup_instaflow = time_rf2 / time_instaflow
     results['InstaFlow (1 step)'] = {
         'steps': 1,
         'time': time_instaflow,
@@ -202,17 +205,17 @@ def plot_comparison(results, save_dir):
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
     # Plot 1: Number of steps
-    colors = ['#3498db', '#e74c3c', '#2ecc71'][:len(models)]
+    colors = ['#3498db', '#2ecc71'][:len(models)]
     axes[0].bar(range(len(models)), steps, color=colors)
     axes[0].set_xticks(range(len(models)))
     axes[0].set_xticklabels(models, rotation=15, ha='right')
-    axes[0].set_ylabel('Number of ODE Steps')
+    axes[0].set_ylabel('Number of Inference Steps')
     axes[0].set_title('Inference Steps Comparison')
     axes[0].grid(True, alpha=0.3, axis='y')
 
     # Add value labels on bars
     for i, v in enumerate(steps):
-        axes[0].text(i, v + 0.5, str(v), ha='center', va='bottom', fontweight='bold')
+        axes[0].text(i, v + max(steps)*0.02, str(v), ha='center', va='bottom', fontweight='bold')
 
     # Plot 2: Sampling time
     axes[1].bar(range(len(models)), times, color=colors)
@@ -224,21 +227,21 @@ def plot_comparison(results, save_dir):
 
     # Add value labels
     for i, v in enumerate(times):
-        axes[1].text(i, v + 0.5, f'{v:.1f}s', ha='center', va='bottom', fontweight='bold')
+        axes[1].text(i, v + max(times)*0.02, f'{v:.1f}s', ha='center', va='bottom', fontweight='bold')
 
     # Plot 3: Speedup
     axes[2].bar(range(len(models)), speedups, color=colors)
     axes[2].set_xticks(range(len(models)))
     axes[2].set_xticklabels(models, rotation=15, ha='right')
-    axes[2].set_ylabel('Speedup vs Base FM')
+    axes[2].set_ylabel('Speedup vs 2-RF Teacher')
     axes[2].set_title('Speedup Comparison')
-    axes[2].axhline(y=1.0, color='gray', linestyle='--', alpha=0.5, label='Baseline')
+    axes[2].axhline(y=1.0, color='gray', linestyle='--', alpha=0.5, label='2-RF Baseline')
     axes[2].grid(True, alpha=0.3, axis='y')
     axes[2].legend()
 
     # Add value labels
     for i, v in enumerate(speedups):
-        axes[2].text(i, v + 0.1, f'{v:.1f}x', ha='center', va='bottom', fontweight='bold')
+        axes[2].text(i, v + max(speedups)*0.02, f'{v:.1f}x', ha='center', va='bottom', fontweight='bold')
 
     plt.tight_layout()
     plot_path = save_dir / "instaflow_comparison.png"
@@ -247,22 +250,23 @@ def plot_comparison(results, save_dir):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate InstaFlow one-step generation")
-    parser.add_argument("--base_ckpt_path", type=str, required=True,
-                        help="Path to base FM checkpoint")
+    parser = argparse.ArgumentParser(description="Phase 2: Evaluate InstaFlow one-step generation against 2-RF teacher")
+    parser.add_argument("--rf2_ckpt_path", type=str, required=True,
+                        help="Path to 2-Rectified Flow teacher checkpoint from Phase 1 (.ckpt file)")
     parser.add_argument("--instaflow_ckpt_path", type=str, required=True,
-                        help="Path to InstaFlow checkpoint")
-    parser.add_argument("--rectified_ckpt_path", type=str, default=None,
-                        help="Optional: Path to rectified flow checkpoint for comparison")
+                        help="Path to InstaFlow checkpoint from Phase 2")
     parser.add_argument("--save_dir", type=str, default="results/instaflow_evaluation",
-                        help="Directory to save results")
+                        help="Directory to save evaluation results")
     parser.add_argument("--num_samples", type=int, default=500,
-                        help="Number of samples to generate")
-    parser.add_argument("--batch_size", type=int, default=128, help="Batch size for generation")
-    parser.add_argument("--gpu", type=int, default=0, help="GPU device ID")
+                        help="Number of samples to generate for evaluation")
+    parser.add_argument("--batch_size", type=int, default=128,
+                        help="Batch size for generation")
+    parser.add_argument("--gpu", type=int, default=0,
+                        help="GPU device ID")
     parser.add_argument("--use_cfg", action="store_true", default=True,
                         help="Use classifier-free guidance")
-    parser.add_argument("--cfg_scale", type=float, default=7.5, help="CFG guidance scale")
+    parser.add_argument("--rf2_inference_steps", type=int, default=20,
+                        help="Number of ODE steps for 2-RF teacher sampling")
 
     args = parser.parse_args()
     main(args)
