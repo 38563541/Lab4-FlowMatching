@@ -119,11 +119,26 @@ class DDPMScheduler(BaseScheduler):
         """
         ######## TODO ########
         # 1. Extract beta_t, alpha_t, and alpha_bar_t from the scheduler.
-        # 2. Compute the predicted mean μ_θ(x_t, t) = 1/√α_t * (x_t - (β_t/√(1-ᾱ_t)) * ε̂_θ).
-        # 3. Compute the posterior variance \tilde{β}_t = ((1-ᾱ_{t-1})/(1-ᾱ_t)) * β_t.
-        # 4. Add Gaussian noise scaled by √(\tilde{β}_t) unless t == 0.
+        # 2. Compute the predicted mean.
+        # 3. Compute the posterior variance.
+        # 4. Add Gaussian noise unless t == 0.
         # 5. Return the final sample at t-1.
-        sample_prev = None
+
+        # Extract coefficients
+        beta_t = extract(self.betas, t, x_t)
+        alpha_t = extract(self.alphas, t, x_t)
+        alpha_bar_t = extract(self.alphas_cumprod, t, x_t)
+
+        # Compute predicted mean
+        mean = (1.0 / alpha_t.sqrt()) * (x_t - (beta_t / (1 - alpha_bar_t).sqrt()) * eps_theta)
+
+        # Add noise if not at t=0
+        if t == 0:
+            sample_prev = mean
+        else:
+            sigma_t = extract(self.sigmas, t, x_t)
+            noise = torch.randn_like(x_t)
+            sample_prev = mean + sigma_t * noise
         #######################
         return sample_prev
 
@@ -140,8 +155,30 @@ class DDPMScheduler(BaseScheduler):
             sample_prev: denoised image sample at timestep t-1
         """
         ######## TODO ########
+        # Compute mean from x0 prediction
+        alpha_t = extract(self.alphas, t, x_t)
+        alpha_bar_t = extract(self.alphas_cumprod, t, x_t)
+        beta_t = extract(self.betas, t, x_t)
 
-        sample_prev = None
+        alpha_bar_t_prev = extract(
+            torch.cat([torch.tensor([1.0]).to(x_t.device), self.alphas_cumprod[:-1]]),
+            t,
+            x_t
+        )
+
+        # Compute posterior mean from x0: mu = (sqrt(alpha_bar_{t-1}) * beta_t / (1 - alpha_bar_t)) * x0 + (sqrt(alpha_t) * (1 - alpha_bar_{t-1}) / (1 - alpha_bar_t)) * x_t
+        coef1 = (alpha_bar_t_prev.sqrt() * beta_t) / (1 - alpha_bar_t)
+        coef2 = (alpha_t.sqrt() * (1 - alpha_bar_t_prev)) / (1 - alpha_bar_t)
+        mean = coef1 * x0_pred + coef2 * x_t
+
+        # Add noise if not at t=0
+        if t == 0:
+            sample_prev = mean
+        else:
+            sigma_t = extract(self.sigmas, t, x_t)
+            noise = torch.randn_like(x_t)
+            sample_prev = mean + sigma_t * noise
+
         #######################
         return sample_prev
 
@@ -158,8 +195,13 @@ class DDPMScheduler(BaseScheduler):
             sample_prev: denoised image sample at timestep t-1
         """
         ######## TODO ########
-
-        sample_prev = None
+        # Network directly predicts the mean, just add noise
+        if t == 0:
+            sample_prev = mean_theta
+        else:
+            sigma_t = extract(self.sigmas, t, x_t)
+            noise = torch.randn_like(x_t)
+            sample_prev = mean_theta + sigma_t * noise
         #######################
         return sample_prev
 
@@ -187,14 +229,16 @@ class DDPMScheduler(BaseScheduler):
             x_t: (`torch.Tensor [B,C,H,W]`): noisy samples at timestep t.
             eps: (`torch.Tensor [B,C,H,W]`): injected noise.
         """
-        
+
         if eps is None:
-            eps       = torch.randn(x_0.shape, device='cuda')
+            eps = torch.randn(x_0.shape, device=x_0.device)
 
         ######## TODO ########
         # DO NOT change the code outside this part.
         # Assignment 1. Implement the DDPM forward step.
-        x_t = None
+        # q(x_t | x_0) = sqrt(ᾱ_t) * x_0 + sqrt(1 - ᾱ_t) * ε
+        alpha_bar_t = extract(self.alphas_cumprod, t, x_0)
+        x_t = alpha_bar_t.sqrt() * x_0 + (1 - alpha_bar_t).sqrt() * eps
         #######################
 
         return x_t, eps
