@@ -2,7 +2,7 @@
 Generate InstaFlow Distillation Dataset (Task 4 - Phase 2)
 
 This script generates training pairs (x_0, x_1) for distilling a 2-Rectified Flow teacher model
-into a one-step generator. The 2-RF teacher (from Phase 1) has straighter generation paths,
+into a one-step generator. The 1-RF teacher (from Phase 1) has straighter generation paths,
 making it an ideal teacher for one-step distillation.
 
 Uses lower CFG guidance scale (α₂ = 1.5) compared to Phase 1 (α₁ = 7.5) to avoid over-saturation.
@@ -35,15 +35,15 @@ def main(args):
     device = f"cuda:{args.gpu}"
 
     # Load 2-Rectified Flow teacher model (from Phase 1)
-    print(f"Loading 2-Rectified Flow teacher checkpoint from {args.rf2_ckpt_path}")
+    print(f"Loading 2-Rectified Flow teacher checkpoint from {args.rf1_ckpt_path}")
     teacher = FlowMatching(None, None)
-    teacher.load(args.rf2_ckpt_path)
+    teacher.load(args.rf1_ckpt_path)
     teacher.eval()
     teacher = teacher.to(device)
 
     if args.use_cfg:
-        assert teacher.network.use_cfg, "The 2-RF model was not trained with CFG support."
-        num_classes = teacher.network.num_classes
+        assert teacher.network.use_cfg, "The 1-RF model was not trained with CFG support."
+        num_classes = teacher.network.class_embedding.num_embeddings
         print(f"Using CFG with {num_classes} classes (including null class)")
     else:
         num_classes = None
@@ -52,7 +52,7 @@ def main(args):
     num_batches = int(np.ceil(total_num_samples / args.batch_size))
 
     print(f"\nGenerating {total_num_samples} distillation pairs for InstaFlow...")
-    print(f"2-RF teacher uses {args.num_inference_steps} ODE steps")
+    print(f"1-RF teacher uses {args.num_inference_steps} ODE steps")
     print(f"CFG guidance scale (α₂): {args.cfg_scale}")
     print(f"This is Phase 2: Distilling to one-step generator\n")
 
@@ -71,7 +71,7 @@ def main(args):
         else:
             labels = None
 
-        # Generate x_1 using 2-RF teacher model with CFG (guidance scale α₂)
+        # Generate x_1 using 1-RF teacher model with CFG (guidance scale α₂)
         x_1 = teacher.sample(
             shape,
             class_label=labels,
@@ -108,7 +108,7 @@ def main(args):
         "distillation_type": "instaflow",
         "phase": "phase2_instaflow_training",
         "target_steps": 1,
-        "purpose": "Distill 2-RF teacher to one-step InstaFlow student",
+        "purpose": "Distill 1-RF teacher to one-step InstaFlow student",
     }
     with open(save_dir / "metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
@@ -126,9 +126,9 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Phase 2: Generate InstaFlow distillation dataset from 2-RF teacher"
+        description="Phase 2: Generate InstaFlow distillation dataset from 1-RF teacher"
     )
-    parser.add_argument("--rf2_ckpt_path", type=str, required=True,
+    parser.add_argument("--rf1_ckpt_path", type=str, required=True,
                         help="Path to 2-Rectified Flow teacher checkpoint from Phase 1 (.ckpt file)")
     parser.add_argument("--num_samples", type=int, default=50000,
                         help="Number of distillation pairs to generate (default: 50000)")
@@ -141,9 +141,9 @@ if __name__ == "__main__":
     parser.add_argument("--use_cfg", action="store_true",
                         help="Use classifier-free guidance")
     parser.add_argument("--cfg_scale", type=float, default=1.5,
-                        help="CFG guidance scale α₂ for 2-RF teacher (default: 1.5, lower than Phase 1)")
+                        help="CFG guidance scale α₂ for 1-RF teacher (default: 1.5, lower than Phase 1)")
     parser.add_argument("--num_inference_steps", type=int, default=20,
-                        help="Number of ODE steps for 2-RF teacher sampling (default: 20)")
+                        help="Number of ODE steps for 1-RF teacher sampling (default: 20)")
     parser.add_argument("--save_images", action="store_true",
                         help="Save first 100 samples as images for inspection")
     parser.add_argument("--seed", type=int, default=42,

@@ -11,7 +11,8 @@ Usage:
     python -m task4_instaflow.train_instaflow \
         --distill_data_path data/afhq_instaflow \
         --use_cfg \
-        --train_num_steps 100000
+        --train_num_steps 100000 \
+        --warmup_steps 5000
 """
 
 import argparse
@@ -23,6 +24,12 @@ from pathlib import Path
 import matplotlib
 import matplotlib.pyplot as plt
 import torch
+# Import schedulers needed for Linear Warmup + Cosine Decay
+from torch.optim.lr_scheduler import (
+    LinearLR,
+    CosineAnnealingLR,
+    SequentialLR,
+)
 from dotmap import DotMap
 from pytorch_lightning import seed_everything
 from tqdm import tqdm
@@ -99,17 +106,44 @@ def main(args):
         dropout=0.1,
         use_cfg=args.use_cfg,
         cfg_dropout=args.cfg_dropout,
-        num_classes=num_classes,
+        num_classes=num_classes-1,  # Exclude null class
     )
 
     # Use InstaFlowModel instead of FlowMatching
     instaflow = InstaFlowModel(network, use_lpips=args.use_lpips)
     instaflow = instaflow.to(config.device)
 
-    # Same optimizer and scheduler as base FM
+    # Optimizer
     optimizer = torch.optim.Adam(instaflow.network.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, lr_lambda=lambda t: min((t + 1) / config.warmup_steps, 1.0)
+
+    print(f"Setting up LR scheduler: {config.warmup_steps} warmup steps, "
+          f"then cosine decay for {config.train_num_steps - config.warmup_steps} steps.")
+
+    # 1. Linear warmup scheduler
+    # We'll start from a very small LR and warm up to the base LR
+    warmup_scheduler = LinearLR(
+        optimizer,
+        start_factor=1e-6,  # Start LR = 1e-6 * args.lr
+        end_factor=1.0,       # End LR = 1.0 * args.lr
+        total_iters=config.warmup_steps
+    )
+
+    # 2. Cosine decay scheduler
+    # This will run for the remaining steps after warmup
+    # Ensure T_max is not negative if warmup_steps >= train_num_steps
+    cosine_t_max = max(1, config.train_num_steps - config.warmup_steps)
+    cosine_scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=cosine_t_max,
+        eta_min=0  # As in the original scheduler
+    )
+
+    # 3. Combine them sequentially
+    # The scheduler will switch from warmup to cosine at `milestones`
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[config.warmup_steps]
     )
 
     step = 0
@@ -155,7 +189,7 @@ def main(args):
                 x_0, x_1, label = x_0.to(config.device), x_1.to(config.device), label.to(config.device)
             else:
                 x_0, x_1 = next(train_it)
-                x_0, x_1 = x_0.to(config.device), x_1.to(config.device)
+                x_0, x_1 = x_0.to(config.deveice), x_1.to(config.device)
                 label = None
 
             # Compute InstaFlow distillation loss
@@ -166,7 +200,7 @@ def main(args):
             else:
                 loss = instaflow.get_loss(x_1, x_0)
 
-            pbar.set_description(f"Loss: {loss.item():.4f}")
+            pbar.set_description(f"Loss: {loss.item():.4f} LR: {scheduler.get_last_lr()[0]:.6f}")
 
             # Optimization step
             optimizer.zero_grad()
@@ -177,7 +211,7 @@ def main(args):
                 torch.nn.utils.clip_grad_norm_(instaflow.network.parameters(), args.grad_clip)
 
             optimizer.step()
-            scheduler.step()
+            scheduler.step()  # This steps the SequentialLR
             losses.append(loss.item())
 
             step += 1
@@ -194,7 +228,7 @@ def main(args):
     print(f"  --num_inference_steps 1")
     print("\nEvaluate your model:")
     print(f"python -m task4_instaflow.evaluate_instaflow \\")
-    print(f"  --rf2_ckpt_path <2RF_CKPT> \\")
+    print(f"  --rf1_ckpt_path <2RF_CKPT> \\")
     print(f"  --instaflow_ckpt_path {save_dir}/last.ckpt \\")
     print(f"  --save_dir results/instaflow_eval")
     print("="*80)
@@ -212,14 +246,16 @@ if __name__ == "__main__":
         default=100000,
         help="Number of training steps",
     )
-    parser.add_argument("--warmup_steps", type=int, default=200)
+    # Note: Added a default for warmup_steps, but it's often set via command line
+    parser.add_argument("--warmup_steps", type=int, default=5000,
+                        help="Number of linear warmup steps")
     parser.add_argument("--log_interval", type=int, default=200)
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--seed", type=int, default=63)
     parser.add_argument("--use_cfg", action="store_true")
-    parser.add_argument("--cfg_dropout", type=float, default=0.1)
+    parser.add_argument("--cfg_dropout", type=float, default=0.0)
     parser.add_argument("--use_lpips", action="store_true",
-                        help="Use LPIPS perceptual loss in addition to L2 (improves quality)")
+                        help="Use LPIPS perceptual loss instead of L2 (improves quality)")
     parser.add_argument("--grad_clip", type=float, default=1.0,
                         help="Gradient clipping (0 to disable)")
     args = parser.parse_args()

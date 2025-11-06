@@ -6,7 +6,7 @@ Measures both quality (FID) and speed (samples/second).
 
 Usage:
     python -m task4_instaflow.evaluate_instaflow \
-        --rf2_ckpt_path results/2rf_from_ddpm-XXX/last.ckpt \
+        --rf1_ckpt_path results/2rf_from_ddpm-XXX/last.ckpt \
         --instaflow_ckpt_path results/instaflow-XXX/last.ckpt \
         --save_dir results/instaflow_eval
 """
@@ -110,11 +110,11 @@ def main(args):
     device = f"cuda:{args.gpu}"
 
     # Load 2-Rectified Flow teacher model
-    print(f"Loading 2-Rectified Flow teacher model from {args.rf2_ckpt_path}")
-    rf2_teacher = FlowMatching(None, None)
-    rf2_teacher.load(args.rf2_ckpt_path)
-    rf2_teacher.eval()
-    rf2_teacher = rf2_teacher.to(device)
+    print(f"Loading 2-Rectified Flow teacher model from {args.rf1_ckpt_path}")
+    rf1_teacher = FlowMatching(None, None)
+    rf1_teacher.load(args.rf1_ckpt_path)
+    rf1_teacher.eval()
+    rf1_teacher = rf1_teacher.to(device)
 
     print(f"Loading InstaFlow model from {args.instaflow_ckpt_path}")
     instaflow = InstaFlowModel(None)
@@ -131,24 +131,24 @@ def main(args):
     print(f"{'='*80}\n")
 
     # 1. 2-Rectified Flow Teacher (multi-step baseline)
-    rf2_steps = args.rf2_inference_steps
-    print(f"1. 2-Rectified Flow Teacher ({rf2_steps} steps)")
-    samples_rf2, time_rf2 = generate_samples_fm(
-        rf2_teacher, args.num_samples, rf2_steps, args.batch_size, device,
-        use_cfg=args.use_cfg, cfg_scale=1.5, model_name="2-RF Teacher"
+    rf1_steps = args.rf1_inference_steps
+    print(f"1. 2-Rectified Flow Teacher ({rf1_steps} steps)")
+    samples_rf1, time_rf1 = generate_samples_fm(
+        rf1_teacher, args.num_samples, rf1_steps, args.batch_size, device,
+        use_cfg=args.use_cfg, cfg_scale=1.5, model_name="1-RF Teacher"
     )
-    rf2_save_dir = save_dir / f"2rf_{rf2_steps}steps"
-    save_samples(samples_rf2, rf2_save_dir)
+    rf1_save_dir = save_dir / f"2rf_{rf1_steps}steps"
+    save_samples(samples_rf1, rf1_save_dir)
 
-    results[f'2-RF Teacher ({rf2_steps} steps)'] = {
-        'steps': rf2_steps,
-        'time': time_rf2,
-        'samples_per_sec': args.num_samples / time_rf2,
+    results[f'1-RF Teacher ({rf1_steps} steps)'] = {
+        'steps': rf1_steps,
+        'time': time_rf1,
+        'samples_per_sec': args.num_samples / time_rf1,
         'speedup': 1.0,
-        'save_dir': str(rf2_save_dir)
+        'save_dir': str(rf1_save_dir)
     }
-    print(f"   Time: {time_rf2:.2f}s ({args.num_samples/time_rf2:.2f} samples/s)")
-    print(f"   Saved to: {rf2_save_dir}\n")
+    print(f"   Time: {time_rf1:.2f}s ({args.num_samples/time_rf1:.2f} samples/s)")
+    print(f"   Saved to: {rf1_save_dir}\n")
 
     # 2. InstaFlow with 1 step (ONE-STEP GENERATION!)
     print("2. InstaFlow (ONE STEP)")
@@ -159,7 +159,7 @@ def main(args):
     instaflow_save_dir = save_dir / "instaflow_1step"
     save_samples(samples_instaflow, instaflow_save_dir)
 
-    speedup_instaflow = time_rf2 / time_instaflow
+    speedup_instaflow = time_rf1 / time_instaflow
     results['InstaFlow (1 step)'] = {
         'steps': 1,
         'time': time_instaflow,
@@ -233,9 +233,9 @@ def plot_comparison(results, save_dir):
     axes[2].bar(range(len(models)), speedups, color=colors)
     axes[2].set_xticks(range(len(models)))
     axes[2].set_xticklabels(models, rotation=15, ha='right')
-    axes[2].set_ylabel('Speedup vs 2-RF Teacher')
+    axes[2].set_ylabel('Speedup vs 1-RF Teacher')
     axes[2].set_title('Speedup Comparison')
-    axes[2].axhline(y=1.0, color='gray', linestyle='--', alpha=0.5, label='2-RF Baseline')
+    axes[2].axhline(y=1.0, color='gray', linestyle='--', alpha=0.5, label='1-RF Baseline')
     axes[2].grid(True, alpha=0.3, axis='y')
     axes[2].legend()
 
@@ -250,8 +250,8 @@ def plot_comparison(results, save_dir):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Phase 2: Evaluate InstaFlow one-step generation against 2-RF teacher")
-    parser.add_argument("--rf2_ckpt_path", type=str, required=True,
+    parser = argparse.ArgumentParser(description="Phase 2: Evaluate InstaFlow one-step generation against 1-RF teacher")
+    parser.add_argument("--rf1_ckpt_path", type=str, required=True,
                         help="Path to 2-Rectified Flow teacher checkpoint from Phase 1 (.ckpt file)")
     parser.add_argument("--instaflow_ckpt_path", type=str, required=True,
                         help="Path to InstaFlow checkpoint from Phase 2")
@@ -265,8 +265,8 @@ if __name__ == "__main__":
                         help="GPU device ID")
     parser.add_argument("--use_cfg", action="store_true", default=True,
                         help="Use classifier-free guidance")
-    parser.add_argument("--rf2_inference_steps", type=int, default=20,
-                        help="Number of ODE steps for 2-RF teacher sampling")
+    parser.add_argument("--rf1_inference_steps", type=int, default=20,
+                        help="Number of ODE steps for 1-RF teacher sampling")
 
     args = parser.parse_args()
     main(args)
