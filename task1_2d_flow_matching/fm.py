@@ -20,10 +20,6 @@ class FMScheduler(nn.Module):
         self.sigma_min = sigma_min
 
     def uniform_sample_t(self, batch_size) -> torch.LongTensor:
-        # ----------------------------------------------------
-        # 這是課程提供的程式碼 - 我們假設它正確
-        # 它會產生 t = [0, 0.001, 0.002, ..., 0.999]
-        # ----------------------------------------------------
         ts = (
             np.random.choice(np.arange(self.num_train_timesteps), batch_size)
             / self.num_train_timesteps
@@ -33,20 +29,29 @@ class FMScheduler(nn.Module):
     def compute_psi_t(self, x1, t, x):
         """
         Compute the conditional flow psi_t(x | x_1).
+
+        Note that time flows in the opposite direction compared to DDPM/DDIM.
+        As t moves from 0 to 1, the probability paths shift from a prior distribution p_0(x)
+        to a more complex data distribution p_1(x).
+
+        Input:
+            x1 (`torch.Tensor`): Data sample from the data distribution.
+            t (`torch.Tensor`): Timestep in [0,1).
+            x (`torch.Tensor`): The input to the conditional psi_t(x).
+        Output:
+            psi_t (`torch.Tensor`): The conditional flow at t.
         """
         t = expand_t(t, x1)
 
-        ######## TODO 1 (修正) ########
-        # 我們不使用 t，而是使用 sigma_t
-        # sigma_t = (1 - sigma_min) * t + sigma_min
-        # 這能確保我們的路徑最小從 sigma_min (0.01) 開始，避免 t=0
-        
-        sigma_t = (1.0 - self.sigma_min) * t + self.sigma_min
-        
-        # x_t = (1 - sigma_t) * x0 + sigma_t * x1
+        ######## TODO ########
+        # DO NOT change the code outside this part.
+        # compute psi_t(x)
+
+        # x 是 x0 (prior/noise), x1 是 data。
+        # 線性插值： x_t = (1 - t) * x0 + t * x1
         x0 = x
-        psi_t = (1.0 - sigma_t) * x0 + sigma_t * x1
-        ##############################
+        psi_t = (1.0 - t) * x0 + t * x1
+        ######################
 
         return psi_t
 
@@ -56,11 +61,16 @@ class FMScheduler(nn.Module):
         x_next = xt + dt * vt
         """
 
-        ######## TODO 2 (已修正) ########
-        # 保持我們先前的 bug fix
+        ######## TODO ########
+        # DO NOT change the code outside this part.
+        # implement each step of the first-order Euler method.
+
+        # 確保 dt 可廣播並跟 xt 同 device/dtype
+        dt = dt.to(xt)
         dt = expand_t(dt, xt)
         x_next = xt + vt * dt
-        ##############################
+
+        ######################
 
         return x_next
 
@@ -84,35 +94,29 @@ class FlowMatching(nn.Module):
         The conditional flow matching objective, corresponding Eq. 23 in the FM paper.
         """
         batch_size = x1.shape[0]
-        # t 可能是 0
         t = self.fm_scheduler.uniform_sample_t(batch_size).to(x1)
         if x0 is None:
             x0 = torch.randn_like(x1)
 
-        ######## TODO 3 (修正) ########
-        # 1. 計算 x_t (使用新的 sigma_t 路徑)
-        #    這會呼叫我們修正過的 compute_psi_t
+        ######## TODO ########
+        # DO NOT change the code outside this part.
+        # Implement the CFM objective.
+
+        # 1. compute interpolated x_t
         xt = self.conditional_psi_sample(x1, t, x0=x0)
-        
-        # 2. 計算 u_t (目標向量場)
-        #    如果 x_t = (1 - sigma_t)x0 + sigma_t*x1
-        #    其中 sigma_t = (1 - sigma_min) * t + sigma_min
-        #    那麼 d(x_t) / dt = d(sigma_t) / dt * (x1 - x0)
-        #    d(sigma_t) / dt = (1 - sigma_min)
-        #    所以 u_t = (1 - self.fm_scheduler.sigma_min) * (x1 - x0)
-        
-        sigma_derivative = (1.0 - self.fm_scheduler.sigma_min)
-        ut = sigma_derivative * (x1 - x0)
-        
-        # 3. 取得模型預測的向量場 v_theta(xt, t)
+
+        # 2. compute target vector field u_t = d/dt x_t = x1 - x0
+        ut = x1 - x0
+
+        # 3. model prediction v_theta(xt, t)
         if class_label is not None:
-            model_out = self.network(xt, t, class_label=class_label)
+            v_pred = self.network(xt, t, class_label=class_label)
         else:
-            model_out = self.network(xt, t)
-            
-        # 4. 計算 L2 Loss: || v_theta - u_t ||^2
-        loss = F.mse_loss(model_out, ut)
-        ##############################
+            v_pred = self.network(xt, t)
+
+        # 4. mse loss between predicted vector field and target
+        loss = F.mse_loss(v_pred, ut)
+        ######################
 
         return loss
 
@@ -148,31 +152,53 @@ class FlowMatching(nn.Module):
         ]
         timesteps = [torch.tensor([t] * x_T.shape[0]).to(x_T) for t in timesteps]
         pbar = tqdm(timesteps) if verbose else timesteps
-        
         xt = x_T
         for i, t in enumerate(pbar):
             t_next = timesteps[i + 1] if i < len(timesteps) - 1 else torch.ones_like(t)
-            dt = t_next - t
+            
 
-            ######## TODO 4 (已修正) ########
-            # 保持我們先前的 bug fix
+            ######## TODO ########
+            # Complete the sampling loop
+
+            # compute dt (shape [B])
+            dt = (t_next - t).to(xt)
+
+            # classifier-free guidance handling
             if do_classifier_free_guidance:
                 v_cond = self.network(xt, t, class_label=class_label)
-                v_uncond = self.network(xt, t, class_label=None) 
+                v_uncond = self.network(xt, t, class_label=None)
                 vt = v_uncond + guidance_scale * (v_cond - v_uncond)
             else:
                 vt = self.network(xt, t)
-            
-            xt_next = self.fm_scheduler.step(xt, vt, dt)
-            xt = xt_next
-            ##############################
+
+            # Euler step
+            xt = self.fm_scheduler.step(xt, vt, dt)
+
+            ######################
 
             traj[-1] = traj[-1].cpu()
             traj.append(xt.clone().detach())
-            
         if return_traj:
             return traj
         else:
             return traj[-1]
 
-    # ... (save 和 load 函式不變) ...
+    def save(self, file_path):
+        hparams = {
+            "network": self.network,
+            "fm_scheduler": self.fm_scheduler,
+        }
+        state_dict = self.state_dict()
+
+        dic = {"hparams": hparams, "state_dict": state_dict}
+        torch.save(dic, file_path)
+
+    def load(self, file_path):
+        dic = torch.load(file_path, map_location="cpu")
+        hparams = dic["hparams"]
+        state_dict = dic["state_dict"]
+
+        self.network = hparams["network"]
+        self.fm_scheduler = hparams["fm_scheduler"]
+
+        self.load_state_dict(state_dict)
