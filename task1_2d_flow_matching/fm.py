@@ -59,11 +59,22 @@ class FMScheduler(nn.Module):
         The simplest ode solver as the first-order Euler method:
         x_next = xt + dt * vt
         """
+        print("updated")
 
         ######## TODO ########
         # DO NOT change the code outside this part.
         # implement each step of the first-order Euler method.
         # x_next = xt + v(xt, t) * dt
+        
+        # --------------------
+        # 這是我們的修正
+        # --------------------
+        # 我們必須將 dt [shape=(500,)] 擴展為 [shape=(500, 1)]
+        # 才能與 xt [shape=(500, 2)] 和 vt [shape=(500, 2)] 
+        # 正確地進行廣播 (broadcasting)
+        dt = expand_t(dt, xt)
+        # --------------------
+        
         x_next = xt + vt * dt
         ######################
 
