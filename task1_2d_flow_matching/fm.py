@@ -37,7 +37,7 @@ class FMScheduler(nn.Module):
         Input:
             x1 (`torch.Tensor`): Data sample from the data distribution.
             t (`torch.Tensor`): Timestep in [0,1).
-            x (`torch.Tensor`): The input to the conditional psi_t(x).
+            x (`torch.Tensor`): The input to the conditional psi_t(x). (Assuming this is x0/Prior)
         Output:
             psi_t (`torch.Tensor`): The conditional flow at t.
         """
@@ -46,8 +46,10 @@ class FMScheduler(nn.Module):
         ######## TODO ########
         # DO NOT change the code outside this part.
         # compute psi_t(x)
-
-        psi_t = t*x1 + (1-t)*x
+        
+        # 修正邏輯：使用與 Reference V3 一致的線性插值
+        # t=0 時為 x (prior/noise), t=1 時為 x1 (data)
+        psi_t = t * x1 + (1 - t) * x
         ######################
 
         return psi_t
@@ -61,6 +63,9 @@ class FMScheduler(nn.Module):
         ######## TODO ########
         # DO NOT change the code outside this part.
         # implement each step of the first-order Euler method.
+        
+        # 修正邏輯：簡單的 Euler 積分
+        # dt 在 sample 中已經處理好(expand)，直接相加
         x_next = xt + dt * vt
         ######################
 
@@ -93,15 +98,21 @@ class FlowMatching(nn.Module):
         ######## TODO ########
         # DO NOT change the code outside this part.
         # Implement the CFM objective.        
+        
+        # 1. 計算當前時間點的 x_t (插值)
         xt = self.fm_scheduler.compute_psi_t(x1, t, x0)
 
+        # 2. 取得模型預測的速度 v
         if class_label is not None:
             model_out = self.network(xt, t, class_label=class_label)
         else:
             model_out = self.network(xt, t)
 
+        # 3. 計算目標速度 (Target Velocity)
+        # 因為我們定義 t=0 是 x0, t=1 是 x1, 所以變化率(斜率)是 x1 - x0
         target = x1 - x0
 
+        # 4. 計算 MSE Loss
         loss = F.mse_loss(model_out, target)
         ######################
 
@@ -133,20 +144,29 @@ class FlowMatching(nn.Module):
             ), f"len(class_label) != batch_size. {len(class_label)} != {batch_size}"
 
         traj = [x_T]
-
+        
+        # 修正邏輯：時間從 0 走向 1 (0 -> 1)
+        # 這與 get_loss 中的物理定義一致
         timesteps = [
             i / num_inference_timesteps for i in range(num_inference_timesteps)
         ]
         timesteps = [torch.tensor([t] * x_T.shape[0]).to(x_T) for t in timesteps]
         pbar = tqdm(timesteps) if verbose else timesteps
-        xt = x_T
+        
+        xt = x_T # 初始狀態是雜訊 (t=0)
+        
         for i, t in enumerate(pbar):
+            # 確保最後一步能準確走到 t=1
             t_next = timesteps[i + 1] if i < len(timesteps) - 1 else torch.ones_like(t)
             
-
             ######## TODO ########
             # Complete the sampling loop
 
+            # 1. 計算 dt (正向積分，dt 為正)
+            dt = t_next - t
+            dt = expand_t(dt, xt)
+
+            # 2. 模型預測速度 v
             if do_classifier_free_guidance:
                 uncond = self.network(xt, t)
                 cond = self.network(xt, t, class_label=class_label)
@@ -157,15 +177,14 @@ class FlowMatching(nn.Module):
                 else:
                     v = self.network(xt, t)
 
-            dt = t_next - t
-            dt = expand_t(dt, xt)
-
+            # 3. 更新 xt
             xt = self.fm_scheduler.step(xt, v, dt)
-
+            
             ######################
 
             traj[-1] = traj[-1].cpu()
             traj.append(xt.clone().detach())
+            
         if return_traj:
             return traj
         else:
