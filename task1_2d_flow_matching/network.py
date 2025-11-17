@@ -20,11 +20,6 @@ class TimeEmbedding(nn.Module):
     def timestep_embedding(t, dim, max_period=10000):
         """
         Create sinusoidal timestep embeddings.
-        :param t: a 1-D Tensor of N indices, one per batch element.
-                  These may be fractional.
-        :param dim: the dimension of the output.
-        :param max_period: controls the minimum frequency of the embeddings.
-        :return: an (N, D) Tensor of positional embeddings.
         """
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
@@ -49,82 +44,80 @@ class TimeEmbedding(nn.Module):
         return t_emb
 
 
+class TimeLinear(nn.Module):
+    def __init__(self, dim_in: int, dim_out: int, num_timesteps: int):
+        super().__init__()
+        self.dim_in = dim_in
+        self.dim_out = dim_out
+        self.num_timesteps = num_timesteps
+
+        # 時間嵌入輸出維度必須與這一層的 output 維度一致，才能進行 element-wise 乘法
+        self.time_embedding = TimeEmbedding(dim_out)
+        self.fc = nn.Linear(dim_in, dim_out)
+
+    def forward(self, x: torch.Tensor, t: torch.Tensor):
+        # 1. 空間特徵轉換
+        x = self.fc(x)
+        
+        # 2. 取得時間特徵並 reshape
+        alpha = self.time_embedding(t).view(-1, self.dim_out)
+
+        # 3. 乘法機制 (Scaling/Gating)
+        return alpha * x
+
+
 class SimpleNet(nn.Module):
     def __init__(
-        self, dim_in: int, dim_out: int, dim_hids: List[int], num_timesteps: int = 1000
+        self, dim_in: int, dim_out: int, dim_hids: List[int], num_timesteps: int
     ):
         super().__init__()
         """
         (TODO) Build a noise estimating network.
-
-        Args:
-            dim_in: dimension of input
-            dim_out: dimension of output
-            dim_hids: dimensions of hidden features
-            num_timesteps: number of timesteps
         """
 
         ######## TODO ########
         # DO NOT change the code outside this part.
-        # Build MLP with time conditioning
-        
-        # 1. 定義時間嵌入層 (Time Embedding)
-        # 我們將時間嵌入維度設為第一層隱藏層的大小，方便拼接或相加
-        self.time_emb_dim = dim_hids[0]
-        self.time_embedding = TimeEmbedding(self.time_emb_dim)
+        self.dim_in = dim_in
+        self.dim_out = dim_out
+        self.dim_hids = dim_hids
+        self.num_timesteps = num_timesteps
 
-        # 2. 建構 MLP 層
-        layers = []
-        
-        # 輸入層：我們採取 "拼接 (Concatenation)" 策略
-        # 輸入維度 = 原始資料維度 (dim_in) + 時間嵌入維度 (time_emb_dim)
-        current_dim = dim_in + self.time_emb_dim
+        self.layers = nn.ModuleList()
+        input_dim = dim_in
         
         # 建立隱藏層
-        for hid_dim in dim_hids:
-            layers.append(nn.Linear(current_dim, hid_dim))
-            layers.append(nn.SiLU()) # SiLU 在 Flow Matching/Diffusion 中表現通常比 ReLU 好
-            current_dim = hid_dim # 下一層的輸入是這一層的輸出
-            
-        self.mlp = nn.Sequential(*layers)
+        for output_dim in dim_hids:
+            self.layers.append(TimeLinear(input_dim, output_dim, num_timesteps))
+            input_dim = output_dim
 
-        # 3. 輸出層 (映射回 dim_out，通常是速度向量的維度)
-        self.head = nn.Linear(current_dim, dim_out)
-        
+        # 建立輸出層 (注意：這個版本的輸出層也是 TimeLinear)
+        self.output_layer = TimeLinear(input_dim, dim_out, num_timesteps)   
         ######################
-
+        
     def forward(self, x: torch.Tensor, t: torch.Tensor, class_label=None):
         """
         (TODO) Implement the forward pass. This should output
         the noise prediction of the noisy input x at timestep t.
 
         Args:
-            x: the noisy data after t period diffusion
-            t: the time that the forward diffusion has been running
+            x: the noisy data
+            t: the timestep
+            class_label: ignored in this simple implementation
         """
         ######## TODO ########
         # DO NOT change the code outside this part.
         
-        # 1. 取得時間嵌入向量
-        t_emb = self.time_embedding(t) # Shape: (Batch, time_emb_dim)
-        
-        # 2. 將時間嵌入與輸入資料拼接 (Concatenate)
-        # x shape: (Batch, dim_in)
-        # t_emb shape: (Batch, time_emb_dim)
-        # result shape: (Batch, dim_in + time_emb_dim)
-        x_input = torch.cat([x, t_emb], dim=-1)
-        
-        # 3. 通過 MLP
-        h = self.mlp(x_input)
-        
-        # 4. 輸出預測結果
-        out = self.head(h)
+        # 通過隱藏層 (TimeLinear -> SiLU)
+        for layer in self.layers:
+            x = layer(x, t)
+            x = F.silu(x)
+            
+        # 通過輸出層 (TimeLinear, 無 Activation)
+        x = self.output_layer(x, t)
         
         ######################
-        
-        return out
+        return x
 
     @property
     def image_resolution(self):
-        # Task 1 是 2D 資料，沒有解析度，回傳 None 即可
         return None
