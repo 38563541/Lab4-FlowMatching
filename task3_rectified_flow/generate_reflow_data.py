@@ -67,24 +67,43 @@ def main(args):
         # the initial noise x_0 and final generated sample z_1.
         # Hint: Set return_traj=True to get the full trajectory if needed.
 
-        # Sample initial noise
-        shape = (B, 3, fm.image_resolution, fm.image_resolution)
-        x_0 = torch.randn(shape).to(device)
+        # 1. 初始化軌跡 (從 x_0 開始)
+        zt = x_0.clone()
 
-        # Sample class labels if using CFG
-        if args.use_cfg:
-            # Sample labels from 1 to num_classes (skip null class 0)
-            labels = torch.randint(1, num_classes + 1, (B,)).to(device)
-        else:
-            labels = None
+        # 2. 定義時間步 (0 -> 1)
+        # 我們使用與 fm.sample 相同的時間切分邏輯
+        timesteps = [i / args.num_inference_steps for i in range(args.num_inference_steps)]
 
-        # Generate z_1 by simulating the learned flow
-        # TODO: Complete this section
-        # Use fm.sample() or manually implement the ODE integration
-        # to generate z_1 from x_0
+        # 3. 執行 Euler 積分迴圈
+        for i, t_val in enumerate(timesteps):
+            # 建立當前時間張量 (Batch Size)
+            t = torch.tensor([t_val] * B).to(device)
+            
+            # 計算下一個時間點 (最後一步是 1.0)
+            t_next_val = timesteps[i + 1] if i < len(timesteps) - 1 else 1.0
+            t_next = torch.tensor([t_next_val] * B).to(device)
 
-        z_1 = x_0  # Replace this with actual generation
+            # 計算 dt
+            dt = t_next - t
+            # 擴展 dt 維度以進行廣播 (Batch, 1, 1, 1)
+            dt = dt.view(-1, *([1] * (zt.ndim - 1)))
 
+            # 預測速度 (Velocity)
+            if args.use_cfg:
+                # CFG 預測: v = v_uncond + scale * (v_cond - v_uncond)
+                v_uncond = fm.network(zt, t, class_label=None)
+                v_cond = fm.network(zt, t, class_label=labels)
+                vt = v_uncond + args.cfg_scale * (v_cond - v_uncond)
+            else:
+                # 一般預測
+                vt = fm.network(zt, t)
+
+            # Euler Step: z_{t+1} = z_t + v_t * dt
+            # 我們可以直接使用 fm_scheduler.step，或直接手寫加法
+            zt = fm.fm_scheduler.step(zt, vt, dt)
+
+        # 4. 最終結果即為 z_1 (Pair: x_0 -> z_1)
+        z_1 = zt
         ######################
 
         # Save the pairs to disk
