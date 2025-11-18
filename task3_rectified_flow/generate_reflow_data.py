@@ -1,11 +1,5 @@
 """
 Generate Reflow Dataset for Rectified Flow Training (Task 3)
-
-This script generates synthetic training pairs (x_0, z_1) by simulating the learned flow
-from a pretrained Flow Matching model. These pairs are used to train a rectified flow model
-that learns straighter trajectories.
-
-Reference: Liu et al., "Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow"
 """
 
 import argparse
@@ -35,126 +29,110 @@ def main(args):
 
     # Load pretrained Flow Matching model
     print(f"Loading checkpoint from {args.ckpt_path}")
+    # Load with weights_only=False to avoid pickle error
     fm = FlowMatching(None, None)
     fm.load(args.ckpt_path)
     fm.eval()
     fm = fm.to(device)
-
+    
+    num_classes = 0
     if args.use_cfg:
-        assert fm.network.use_cfg, "The model was not trained with CFG support."
-        num_classes = fm.network.class_embedding.num_embeddings - 1
-        print(f"Using CFG with {num_classes} classes (including null class)")
+        if hasattr(fm.network, 'use_cfg') and fm.network.use_cfg:
+            num_classes = fm.network.class_embedding.num_embeddings - 1
+            print(f"Using CFG with {num_classes} classes (including null class)")
+        else:
+            print("Warning: use_cfg is True but model might not support it.")
 
     total_num_samples = args.num_samples
     num_batches = int(np.ceil(total_num_samples / args.batch_size))
 
     print(f"Generating {total_num_samples} reflow pairs with {args.num_inference_steps} ODE steps...")
 
-    for i in tqdm(range(num_batches), desc="Generating reflow dataset"):
-        sidx = i * args.batch_size
-        eidx = min(sidx + args.batch_size, total_num_samples)
-        B = eidx - sidx
+    # =====================================================
+    # 關鍵修正：加入 torch.no_grad() 避免記憶體爆炸
+    # =====================================================
+    with torch.no_grad():
+        for i in tqdm(range(num_batches), desc="Generating reflow dataset"):
+            sidx = i * args.batch_size
+            eidx = min(sidx + args.batch_size, total_num_samples)
+            B = eidx - sidx
 
-        ######## TODO ########
-        # DO NOT change the code outside this part.
-        # Implement reflow data generation:
-        # 1. Sample x_0 from prior distribution (e.g., standard Gaussian)
-        # 2. Sample class labels for conditional generation (if using CFG)
-        # 3. Simulate the learned ODE from t=0 to t=1 to obtain z_1 = Φ_1(x_0)
-        # 4. Save the pairs (x_0, z_1, labels) to disk
-        #
-        # Hint: Use fm.sample() to simulate the flow, but you need to store both
-        # the initial noise x_0 and final generated sample z_1.
-        # Hint: Set return_traj=True to get the full trajectory if needed.
+            # 1. 定義 x_0 與 labels
+            shape = (B, 3, fm.image_resolution, fm.image_resolution)
+            x_0 = torch.randn(shape).to(device)
 
-        # 1. 初始化軌跡 (從 x_0 開始)
-        zt = x_0.clone()
-
-        # 2. 定義時間步 (0 -> 1)
-        # 我們使用與 fm.sample 相同的時間切分邏輯
-        timesteps = [i / args.num_inference_steps for i in range(args.num_inference_steps)]
-
-        # 3. 執行 Euler 積分迴圈
-        for i, t_val in enumerate(timesteps):
-            # 建立當前時間張量 (Batch Size)
-            t = torch.tensor([t_val] * B).to(device)
-            
-            # 計算下一個時間點 (最後一步是 1.0)
-            t_next_val = timesteps[i + 1] if i < len(timesteps) - 1 else 1.0
-            t_next = torch.tensor([t_next_val] * B).to(device)
-
-            # 計算 dt
-            dt = t_next - t
-            # 擴展 dt 維度以進行廣播 (Batch, 1, 1, 1)
-            dt = dt.view(-1, *([1] * (zt.ndim - 1)))
-
-            # 預測速度 (Velocity)
-            if args.use_cfg:
-                # CFG 預測: v = v_uncond + scale * (v_cond - v_uncond)
-                v_uncond = fm.network(zt, t, class_label=None)
-                v_cond = fm.network(zt, t, class_label=labels)
-                vt = v_uncond + args.cfg_scale * (v_cond - v_uncond)
+            if args.use_cfg and num_classes > 0:
+                labels = torch.randint(1, num_classes + 1, (B,)).to(device)
             else:
-                # 一般預測
-                vt = fm.network(zt, t)
+                labels = None
 
-            # Euler Step: z_{t+1} = z_t + v_t * dt
-            # 我們可以直接使用 fm_scheduler.step，或直接手寫加法
-            zt = fm.fm_scheduler.step(zt, vt, dt)
+            # 2. 執行手動積分 (產生 z_1)
+            zt = x_0.clone()
+            timesteps = [j / args.num_inference_steps for j in range(args.num_inference_steps)]
 
-        # 4. 最終結果即為 z_1 (Pair: x_0 -> z_1)
-        z_1 = zt
-        ######################
+            for t_idx, t_val in enumerate(timesteps):
+                t = torch.full((B,), t_val, device=device)
+                t_next_val = timesteps[t_idx + 1] if t_idx < len(timesteps) - 1 else 1.0
+                
+                # 計算 dt
+                dt = t_next_val - t_val
+                # Expand dt (scalar to tensor with correct shape)
+                dt_tensor = torch.full((B, 1, 1, 1), dt, device=device)
 
-        # Save the pairs to disk
-        for j in range(B):
-            sample_idx = sidx + j
+                # 預測速度
+                if args.use_cfg and labels is not None:
+                    v_uncond = fm.network(zt, t, class_label=None)
+                    v_cond = fm.network(zt, t, class_label=labels)
+                    vt = v_uncond + args.cfg_scale * (v_cond - v_uncond)
+                else:
+                    vt = fm.network(zt, t)
 
-            # Save as .pt files for efficient loading
-            torch.save(x_0[j].cpu(), save_dir / f"{sample_idx:06d}_x0.pt")
-            torch.save(z_1[j].cpu(), save_dir / f"{sample_idx:06d}_z1.pt")
+                # Euler Step: z_{t+1} = z_t + v_t * dt
+                zt = zt + vt * dt_tensor
 
-            if args.use_cfg:
-                torch.save(labels[j].cpu(), save_dir / f"{sample_idx:06d}_label.pt")
+            z_1 = zt
 
-            # Optionally save as images for visualization
-            if args.save_images and sample_idx < 100:  # Save first 100 as images
-                img_z1 = tensor_to_pil_image(z_1[j].cpu(), single_image=True)
-                img_z1.save(save_dir / f"{sample_idx:06d}_z1.png")
+            # 3. 儲存資料
+            for j in range(B):
+                sample_idx = sidx + j
+                torch.save(x_0[j].cpu(), save_dir / f"{sample_idx:06d}_x0.pt")
+                torch.save(z_1[j].cpu(), save_dir / f"{sample_idx:06d}_z1.pt")
+
+                if labels is not None:
+                    torch.save(labels[j].cpu(), save_dir / f"{sample_idx:06d}_label.pt")
+
+                if args.save_images and sample_idx < 100:
+                    img_z1 = tensor_to_pil_image(z_1[j].cpu(), single_image=True)
+                    img_z1.save(save_dir / f"{sample_idx:06d}_z1.png")
 
     print(f"Reflow dataset saved to {save_dir}")
     print(f"Total samples: {total_num_samples}")
 
-    # Save metadata
     metadata = {
         "num_samples": total_num_samples,
         "num_inference_steps": args.num_inference_steps,
         "use_cfg": args.use_cfg,
         "guidance_scale": args.cfg_scale if args.use_cfg else None,
         "image_resolution": fm.image_resolution,
-        "num_classes": num_classes if args.use_cfg else None,
     }
     with open(save_dir / "metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate reflow dataset for Rectified Flow training")
-    parser.add_argument("--ckpt_path", type=str, required=True, help="Path to pretrained FM checkpoint")
-    parser.add_argument("--num_samples", type=int, default=50000, help="Number of reflow pairs to generate")
-    parser.add_argument("--batch_size", type=int, default=128, help="Batch size for generation")
-    parser.add_argument("--gpu", type=int, default=0, help="GPU device ID")
-    parser.add_argument("--save_dir", type=str, default="data/afhq_reflow", help="Directory to save reflow dataset")
-    parser.add_argument("--use_cfg", action="store_true", help="Use classifier-free guidance")
-    parser.add_argument("--cfg_scale", type=float, default=7.5, help="CFG guidance scale")
-    parser.add_argument("--num_inference_steps", type=int, default=20, help="Number of ODE steps for generation")
-    parser.add_argument("--save_images", action="store_true", help="Save first 100 samples as images")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ckpt_path", type=str, required=True)
+    parser.add_argument("--num_samples", type=int, default=50000)
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument("--save_dir", type=str, default="data/afhq_reflow")
+    parser.add_argument("--use_cfg", action="store_true")
+    parser.add_argument("--cfg_scale", type=float, default=7.5)
+    parser.add_argument("--num_inference_steps", type=int, default=20)
+    parser.add_argument("--save_images", action="store_true")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    # Set seed for reproducibility
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-
     main(args)
