@@ -201,7 +201,7 @@ class FlowMatching(nn.Module):
         torch.save(dic, file_path)
 
     def load(self, file_path):
-        dic = torch.load(file_path, map_location="cpu")
+        dic = torch.load(file_path, map_location="cpu",weights_only=False)
         hparams = dic["hparams"]
         state_dict = dic["state_dict"]
 
